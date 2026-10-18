@@ -36,8 +36,8 @@ FEE_PCT = float(os.getenv("FEE_PCT", "0.1"))      # phí mỗi chiều (%)
 TEST_DAYS = int(os.getenv("TEST_DAYS", "30"))     # số ngày thử nghiệm
 SEND_HOUR = int(os.getenv("SEND_HOUR", "21"))     # giờ gửi (giờ VN)
 STAKE_USD = float(os.getenv("STAKE_USD", "100"))  # vốn giả định mỗi kèo
-MIN_QUOTE_VOL = float(os.getenv("MIN_QUOTE_VOL", "20000000"))  # thanh khoản tối thiểu 24h (USDT)
-UNIVERSE_SIZE = int(os.getenv("UNIVERSE_SIZE", "80"))
+MIN_QUOTE_VOL = float(os.getenv("MIN_QUOTE_VOL", "3000000"))  # thanh khoản tối thiểu 24h (USDT)
+UNIVERSE_SIZE = int(os.getenv("UNIVERSE_SIZE", "60"))
 BT_DAYS = int(os.getenv("BT_DAYS", "45"))         # số ngày backtest walk-forward
 MODE = os.getenv("MODE", "daily").strip() or "daily"
 
@@ -48,7 +48,10 @@ ZALO_API = "https://bot-api.zaloplatforms.com"
 
 BINANCE_BASES = ["https://data-api.binance.vision", "https://api.binance.com", "https://api-gcp.binance.com"]
 EXCLUDE = {"USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "EUR", "AEUR", "EURI", "USDE", "PYUSD",
-           "XUSD", "USD1", "BFUSD", "RLUSD", "USDS", "WBTC", "WBETH", "BETH", "PAXG", "XAUT", "GBP", "TRY"}
+           "XUSD", "USD1", "BFUSD", "RLUSD", "USDS", "WBTC", "WBETH", "BETH", "PAXG", "XAUT", "GBP", "TRY",
+           "U", "USDEB"}
+# Coin thật có tên kết thúc bằng "B"; các mã khác dạng "XXXB" trên Binance là cổ phiếu token hoá (NVDAB, SOXLB...)
+CRYPTO_ENDING_B = {"BNB", "DGB", "TRB", "CKB", "SHIB", "MOB", "PHB", "VIB", "AMB", "ARB", "BB", "YB"}
 
 SESSION_HOURS_UTC = (SEND_HOUR - 7) % 24          # 21h VN = 14h UTC: mốc chia "ngày giao dịch"
 BARS_PER_SESSION = 12                             # 12 nến 2h = 24h
@@ -128,7 +131,9 @@ def select_universe(tickers):
         if not s.endswith("USDT"):
             continue
         base = s[:-4]
-        if base in EXCLUDE or float(t.get("quoteVolume", 0)) < MIN_QUOTE_VOL or int(t.get("count", 0)) == 0:
+        if base in EXCLUDE or (base.endswith("B") and base not in CRYPTO_ENDING_B) or not base.isascii():
+            continue
+        if float(t.get("quoteVolume", 0)) < MIN_QUOTE_VOL or int(t.get("count", 0)) == 0:
             continue
         rows.append((float(t["quoteVolume"]), s))
     uni = [s for _, s in sorted(rows, reverse=True)[:UNIVERSE_SIZE]]
