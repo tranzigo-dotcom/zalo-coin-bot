@@ -1,0 +1,69 @@
+name: Zalo coin bot
+
+on:
+  schedule:
+    - cron: "40 13 * * *"   # 13:40 UTC = 20:40 giờ VN; bot tự chờ tới đúng 21:00 mới gửi
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "test = gửi thử ngay | chatid = lấy chat_id | daily = chạy như thật"
+        type: choice
+        default: test
+        options: [test, chatid, daily]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zalo-coin-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      MODE: ${{ github.event.inputs.mode || 'daily' }}
+      ZALO_BOT_TOKEN: ${{ secrets.ZALO_BOT_TOKEN }}
+      ZALO_CHAT_ID: ${{ secrets.ZALO_CHAT_ID }}
+      IMGBB_API_KEY: ${{ secrets.IMGBB_API_KEY }}
+      TZ: Asia/Ho_Chi_Minh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Lấy chat_id
+        if: env.MODE == 'chatid'
+        run: python bot.py chatid
+
+      - name: Quét thị trường & chọn coin
+        if: env.MODE != 'chatid'
+        run: python bot.py analyze
+
+      - name: Đưa chart lên repo (để Zalo tải ảnh)
+        if: env.MODE != 'chatid'
+        run: |
+          git config user.name "zalo-coin-bot"
+          git config user.email "zalo-coin-bot@users.noreply.github.com"
+          git add -A charts data
+          git diff --cached --quiet || git commit -m "chart $(date +%F)"
+          git push
+
+      - name: Chờ 21:00 rồi gửi Zalo
+        if: env.MODE != 'chatid'
+        run: python bot.py send
+
+      - name: Lưu nhật ký kết quả
+        if: always() && env.MODE == 'daily'
+        run: |
+          git config user.name "zalo-coin-bot"
+          git config user.email "zalo-coin-bot@users.noreply.github.com"
+          git add -A data
+          git diff --cached --quiet || git commit -m "log $(date +%F)"
+          git push
