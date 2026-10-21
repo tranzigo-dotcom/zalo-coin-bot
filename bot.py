@@ -36,7 +36,8 @@ FEE_PCT = float(os.getenv("FEE_PCT", "0.1"))      # phí mỗi chiều (%)
 TEST_DAYS = int(os.getenv("TEST_DAYS", "30"))     # số ngày thử nghiệm
 SEND_HOUR = int(os.getenv("SEND_HOUR", "21"))     # giờ gửi (giờ VN)
 STAKE_USD = float(os.getenv("STAKE_USD", "100"))  # vốn giả định mỗi kèo
-MIN_QUOTE_VOL = float(os.getenv("MIN_QUOTE_VOL", "3000000"))  # thanh khoản tối thiểu 24h (USDT)
+MIN_QUOTE_VOL = float(os.getenv("MIN_QUOTE_VOL", "5000000"))    # lọc sơ bộ: khối lượng 24h (USDT)
+MIN_AVG_VOL = float(os.getenv("MIN_AVG_VOL", "15000000"))       # chỉ đề xuất mã có KL trung bình 7 ngày >= 15 triệu USD
 UNIVERSE_SIZE = int(os.getenv("UNIVERSE_SIZE", "60"))
 BT_DAYS = int(os.getenv("BT_DAYS", "45"))         # số ngày backtest walk-forward
 MODE = os.getenv("MODE", "daily").strip() or "daily"
@@ -50,7 +51,7 @@ BINANCE_BASES = ["https://data-api.binance.vision", "https://api.binance.com", "
 EXCLUDE = {"USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "EUR", "AEUR", "EURI", "USDE", "PYUSD",
            "XUSD", "USD1", "BFUSD", "RLUSD", "USDS", "WBTC", "WBETH", "BETH", "PAXG", "XAUT", "GBP", "TRY",
            "U", "USDEB"}
-# Coin thật có tên kết thúc bằng "B"; các mã khác dạng "XXXB" trên Binance là cổ phiếu token hoá (NVDAB, SOXLB...)
+# Coin có tên kết thúc bằng "B"; các mã khác dạng "XXXB" trên Binance là cổ phiếu token hoá (NVDAB, SOXLB...) — chỉ dùng để ghi chú
 CRYPTO_ENDING_B = {"BNB", "DGB", "TRB", "CKB", "SHIB", "MOB", "PHB", "VIB", "AMB", "ARB", "BB", "YB"}
 
 SESSION_HOURS_UTC = (SEND_HOUR - 7) % 24          # 21h VN = 14h UTC: mốc chia "ngày giao dịch"
@@ -131,7 +132,7 @@ def select_universe(tickers):
         if not s.endswith("USDT"):
             continue
         base = s[:-4]
-        if base in EXCLUDE or (base.endswith("B") and base not in CRYPTO_ENDING_B) or not base.isascii():
+        if base in EXCLUDE:
             continue
         if float(t.get("quoteVolume", 0)) < MIN_QUOTE_VOL or int(t.get("count", 0)) == 0:
             continue
@@ -223,9 +224,20 @@ def n_picks():
     return len(pd.read_csv(PICKS)) if PICKS.exists() else 0
 
 
+def sent_today():
+    """Đã gửi kèo hôm nay chưa (tránh gửi trùng khi GitHub chạy lịch nhiều lần)."""
+    if not PICKS.exists():
+        return False
+    df = pd.read_csv(PICKS)
+    return len(df) > 0 and str(df.date.iloc[-1]) == dt.datetime.now(VN).strftime("%Y-%m-%d")
+
+
 def analyze():
     DATA.mkdir(exist_ok=True)
     CHARTS.mkdir(exist_ok=True)
+    if MODE == "daily" and sent_today():
+        log("Hôm nay đã gửi kèo rồi — bỏ qua.")
+        return
     if MODE == "daily" and (FINISHED.exists() or n_picks() >= TEST_DAYS):
         log("Đã đủ số ngày thử nghiệm — không chọn kèo mới.")
         PENDING.unlink(missing_ok=True)
@@ -244,6 +256,10 @@ def analyze():
         time.sleep(0.05)
     if "BTCUSDT" not in coins:
         raise RuntimeError("Không có dữ liệu BTC")
+    liquid = {sym for sym, (s, _) in coins.items() if s.qvol.iloc[-7:].mean() >= MIN_AVG_VOL}
+    log(f"{len(liquid)} coin đạt thanh khoản TB 7 ngày >= {MIN_AVG_VOL / 1e6:.0f} triệu USD")
+    if not liquid:
+        raise RuntimeError("Không có coin nào đủ thanh khoản")
 
     btc_s = coins["BTCUSDT"][0]
     bf = features(btc_s)
@@ -264,7 +280,7 @@ def analyze():
     bt = []
     for d in known_dates[-BT_DAYS:]:
         tr = df[(df.date < d) & df.y.notna()]
-        te = df[(df.date == d) & df.y.notna()]
+        te = df[(df.date == d) & df.y.notna() & df.symbol.isin(liquid)]
         if len(tr) < 500 or te.empty:
             continue
         p = fit_model(tr).predict_proba(te[FEATS].values)[:, 1]
@@ -284,7 +300,7 @@ def analyze():
     # --- Mô hình cho hôm nay
     train = df[df.y.notna()]
     model = fit_model(train)
-    now_rows = df[df.date == today].copy()
+    now_rows = df[(df.date == today) & df.symbol.isin(liquid)].copy()
     if now_rows.empty:
         raise RuntimeError("Không có dữ liệu phiên hôm nay")
     now_rows["prob"] = model.predict_proba(now_rows[FEATS].values)[:, 1]
@@ -321,6 +337,7 @@ def analyze():
         "btc": {"price": float(btc_s.close.iloc[-1]), "ret1": float(bf.ret1.iloc[-1]),
                 "ret7": float(bf.ret7.iloc[-1]), "above_ema50": bool(bf.dist_ema50.iloc[-1] > 0)},
         "fng": fng, "breadth": int(breadth), "n_coins": int(len(now_rows)),
+        "avg_vol": float(s.qvol.iloc[-7:].mean()),
         "others": [(r.symbol, float(r.prob)) for _, r in now_rows.iloc[1:4].iterrows()],
         "bt": None if btd.empty else {
             "n": len(btd), "hits": int(btd.hit.sum()), "avg_pnl": float(btd.pnl.mean()),
@@ -454,6 +471,11 @@ def cmd_chatid():
 
 
 # ----------------------------- Gửi & chấm điểm ------------------------------
+def is_stock_token(sym):
+    base = sym[:-4]
+    return base.endswith("B") and base not in CRYPTO_ENDING_B
+
+
 def fmt_price(p):
     return f"{p:,.2f}" if p >= 100 else f"{p:,.4f}" if p >= 1 else f"{p:.6g}"
 
@@ -466,6 +488,10 @@ def evaluate_open_picks(now_utc):
     if not PICKS.exists():
         return None
     df = pd.read_csv(PICKS)
+    for col in ("outcome",):
+        df[col] = df[col].astype(object)
+    for col in ("max_up", "max_down", "close_chg", "pnl"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
     last_eval = None
     for i, r in df[df.outcome.isna()].iterrows():
         start = pd.Timestamp(r.entry_time).floor("15min")
@@ -534,7 +560,8 @@ def compose(p, entry, day_no, entry_time_vn):
     to_res = p["resist"] / entry - 1
     lines = [
         f"📊 KÈO {'TEST' if day_no is None else f'NGÀY {day_no}/{TEST_DAYS}'} — {entry_time_vn:%d/%m/%Y %H:%M}",
-        f"🪙 {p['symbol'].replace('USDT', '')}/USDT",
+        f"🪙 {p['symbol'].replace('USDT', '')}/USDT"
+        + (" (cổ phiếu/ETF token hoá trên Binance)" if is_stock_token(p["symbol"]) else ""),
         f"Giá tham chiếu: {fmt_price(entry)}",
         f"🎯 Chốt lời +{TP_PCT:g}%: {fmt_price(tp)}",
         f"🛑 Cắt lỗ -{SL_PCT:g}%: {fmt_price(sl)}",
@@ -549,7 +576,8 @@ def compose(p, entry, day_no, entry_time_vn):
         f"- Xu hướng: {trend}; cách EMA20 {pct(p['dist_ema20'])}, EMA50 {pct(p['dist_ema50'])}",
         f"- RSI14: {r:.0f} ({rsi_txt})",
         f"- MACD: histogram {'đang tăng' if p['macd_hist_chg'] > 0 else 'đang giảm'} ({'dương' if p['macd_hist'] > 0 else 'âm'})",
-        f"- Khối lượng 24h: {p['vol_ratio']:.1f}x trung bình 20 ngày",
+        f"- Khối lượng 24h: {p['vol_ratio']:.1f}x trung bình 20 ngày"
+        + (f" (TB 7 ngày {p['avg_vol'] / 1e6:,.0f} triệu USD/ngày)" if p.get("avg_vol") else ""),
         f"- Biên độ TB (ATR14): {p['atr_pct']:.1%}/ngày",
         f"- Biến động: 24h {pct(p['ret1'])}, 7 ngày {pct(p['ret7'])}",
         f"- Hỗ trợ (đáy 14 ngày): {fmt_price(p['support'])} | Kháng cự (đỉnh 14 ngày): {fmt_price(p['resist'])}"
@@ -577,10 +605,13 @@ def cmd_send():
     if not CHAT_ID:
         raise RuntimeError("Thiếu ZALO_CHAT_ID — chạy chế độ chatid trước")
     test = MODE == "test"
+    if not test and sent_today():
+        log("Hôm nay đã gửi kèo rồi — bỏ qua.")
+        return
     if not test:
         target = dt.datetime.now(VN).replace(hour=SEND_HOUR, minute=0, second=20, microsecond=0)
         wait = (target - dt.datetime.now(VN)).total_seconds()
-        if 0 < wait < 3 * 3600:
+        if 0 < wait < 4 * 3600:
             log(f"Chờ {wait / 60:.1f} phút tới {SEND_HOUR}:00...")
             time.sleep(wait)
     now_vn = dt.datetime.now(VN)
