@@ -2,7 +2,11 @@ name: Zalo coin bot
 
 on:
   schedule:
-    - cron: "40 13 * * *"   # 13:40 UTC = 20:40 giờ VN; bot tự chờ tới đúng 21:00 mới gửi
+    # GitHub hay khởi động lịch trễ 30-60 phút, nên đặt 3 mốc sớm (19:07, 19:37, 20:07 giờ VN).
+    # Lần chạy đầu tiên phân tích rồi chờ tới đúng 21:00 mới gửi; các lần sau thấy đã gửi thì bỏ qua.
+    - cron: "7 12 * * *"
+    - cron: "37 12 * * *"
+    - cron: "7 13 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -21,7 +25,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 240
     env:
       MODE: ${{ github.event.inputs.mode || 'daily' }}
       ZALO_BOT_TOKEN: ${{ secrets.ZALO_BOT_TOKEN }}
@@ -30,6 +34,9 @@ jobs:
       TZ: Asia/Ho_Chi_Minh
     steps:
       - uses: actions/checkout@v4
+
+      - name: Lấy dữ liệu mới nhất
+        run: git pull --ff-only || true
 
       - uses: actions/setup-python@v5
         with:
